@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -58,8 +59,12 @@ func (*Process) PpidWithContext(_ context.Context) (int32, error) {
 	return 0, common.ErrNotImplementedError
 }
 
-func (*Process) NameWithContext(_ context.Context) (string, error) {
-	return "", common.ErrNotImplementedError
+func (p *Process) NameWithContext(ctx context.Context) (string, error) {
+	exe, err := p.fillFromExecnameWithContext(ctx)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(exe), nil
 }
 
 func (*Process) TgidWithContext(_ context.Context) (int32, error) {
@@ -106,8 +111,16 @@ func (*Process) ForegroundWithContext(_ context.Context) (bool, error) {
 	return false, common.ErrNotImplementedError
 }
 
-func (*Process) UidsWithContext(_ context.Context) ([]uint32, error) {
-	return nil, common.ErrNotImplementedError
+func (p *Process) UidsWithContext(ctx context.Context) ([]uint32, error) {
+	uidStr, err := p.getPsField(ctx, "uid")
+	if err != nil {
+		return nil, err
+	}
+	uid, err := strconv.ParseUint(strings.TrimSpace(uidStr), 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	return []uint32{uint32(uid)}, nil
 }
 
 func (*Process) GidsWithContext(_ context.Context) ([]uint32, error) {

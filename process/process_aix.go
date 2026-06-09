@@ -41,18 +41,30 @@ type MemoryInfoExStat struct {
 }
 
 func pidsWithContext(ctx context.Context) ([]int32, error) {
-	panic("CRITICAL: Function not implemented")
+	return readPidsFromDirAix(common.HostProcWithContext(ctx))
 }
 
 func ProcessesWithContext(ctx context.Context) ([]*Process, error) {
-	panic("CRITICAL: Function not implemented")
+	pids, err := PidsWithContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Process, 0, len(pids))
+	for _, pid := range pids {
+		p, err := NewProcessWithContext(ctx, pid)
+		if err != nil {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 func (p *Process) PpidWithContext(ctx context.Context) (int32, error) {
 	panic("CRITICAL: Function not implemented")
 }
 
 func (p *Process) NameWithContext(ctx context.Context) (string, error) {
-	panic("CRITICAL: Function not implemented")
+	return p.getPsField(ctx, "comm")
 }
 
 func (p *Process) TgidWithContext(ctx context.Context) (int32, error) {
@@ -64,11 +76,15 @@ func (p *Process) ExeWithContext(ctx context.Context) (string, error) {
 }
 
 func (p *Process) CmdlineWithContext(ctx context.Context) (string, error) {
-	panic("CRITICAL: Function not implemented")
+	return p.getPsField(ctx, "args")
 }
 
 func (p *Process) CmdlineSliceWithContext(ctx context.Context) ([]string, error) {
-	panic("CRITICAL: Function not implemented")
+	args, err := p.getPsField(ctx, "args")
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(args), nil
 }
 
 func (p *Process) createTimeWithContext(ctx context.Context) (int64, error) {
@@ -102,7 +118,15 @@ func (p *Process) ForegroundWithContext(ctx context.Context) (bool, error) {
 }
 
 func (p *Process) UidsWithContext(ctx context.Context) ([]uint32, error) {
-	panic("CRITICAL: Function not implemented")
+	uidStr, err := p.getPsField(ctx, "uid")
+	if err != nil {
+		return nil, err
+	}
+	uid, err := strconv.ParseUint(strings.TrimSpace(uidStr), 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	return []uint32{uint32(uid)}, nil
 }
 
 func (p *Process) GidsWithContext(ctx context.Context) ([]uint32, error) {
@@ -230,6 +254,29 @@ func (p *Process) EnvironWithContext(ctx context.Context) ([]string, error) {
 }
 
 // Internal functions
+
+func readPidsFromDirAix(path string) ([]int32, error) {
+	d, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+
+	fnames, err := d.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+
+	var pids []int32
+	for _, fname := range fnames {
+		pid, err := strconv.ParseInt(fname, 10, 32)
+		if err != nil {
+			continue
+		}
+		pids = append(pids, int32(pid))
+	}
+	return pids, nil
+}
 
 func (p *Process) getPsField(ctx context.Context, field string) (string, error) {
 	out, err := invoke.CommandWithContext(ctx, "ps", "-o", field, "-p", strconv.Itoa(int(p.Pid)))

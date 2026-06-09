@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -132,4 +133,187 @@ func TestParsePsTime(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, tt.expected, got)
 	}
+}
+
+func TestProcess_AIX_Name(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o comm -p 1234": "COMMAND\n myproc\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	name, err := p.Name()
+	require.NoError(t, err)
+	assert.Equal(t, "myproc", name)
+}
+
+func TestProcess_AIX_Cmdline(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o args -p 1234": "COMMAND\n /usr/bin/myproc arg1 arg2\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	cmdline, err := p.Cmdline()
+	require.NoError(t, err)
+	assert.Equal(t, "/usr/bin/myproc arg1 arg2", cmdline)
+}
+
+func TestProcess_AIX_CmdlineSlice(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o args -p 1234": "COMMAND\n /usr/bin/myproc arg1 arg2\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	args, err := p.CmdlineSlice()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/usr/bin/myproc", "arg1", "arg2"}, args)
+}
+
+func TestProcess_AIX_Uids(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o uid -p 1234": "UID\n 1001\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	uids, err := p.Uids()
+	require.NoError(t, err)
+	assert.Equal(t, []uint32{1001}, uids)
+}
+
+func TestProcess_AIX_MemoryInfo_RssFallback(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	// rssize not available — falls back to rss
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o rss -p 1234": "RSS\n 512\n",
+			"ps -o vsz -p 1234": "VSZ\n 4096\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	m, err := p.MemoryInfo()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(512*1024), m.RSS)
+	assert.Equal(t, uint64(4096*1024), m.VMS)
+}
+
+func TestProcess_AIX_MemoryInfo_VsizeFallback(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	// vsz not available — falls back to vsize
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o rssize -p 1234": "RSS\n 1024\n",
+			"ps -o vsize -p 1234":  "VSIZE\n 2048\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	m, err := p.MemoryInfo()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1024*1024), m.RSS)
+	assert.Equal(t, uint64(2048*1024), m.VMS)
+}
+
+func TestReadPidsFromDirAix(t *testing.T) {
+	td := t.TempDir()
+	for _, name := range []string{"1", "123", "456", "notapid", "7extra"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(td, name), 0755))
+	}
+	pids, err := readPidsFromDirAix(td)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []int32{1, 123, 456}, pids)
+}
+
+func TestProcess_AIX_NativePercent(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o pcpu -p 1234": "%CPU\n  2.5\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	pct, ok, err := p.nativePercentWithContext(context.Background())
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, 2.5*float64(runtime.NumCPU()), pct)
+}
+
+func TestProcess_AIX_NativePercent_ZeroCPU(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o pcpu -p 1234": "%CPU\n  0.0\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	pct, ok, err := p.nativePercentWithContext(context.Background())
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, 0.0, pct)
+}
+
+func TestProcess_AIX_NativePercent_PsError(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	invoke = &mockInvoker{outputs: map[string]string{}}
+
+	p := &Process{Pid: 9999}
+	_, ok, err := p.nativePercentWithContext(context.Background())
+	assert.True(t, ok) // ok=true even on error; caller should not fall back
+	assert.Error(t, err)
+}
+
+func TestProcess_AIX_NativePercent_InvalidValue(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o pcpu -p 1234": "%CPU\n  notanumber\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	_, ok, err := p.nativePercentWithContext(context.Background())
+	assert.True(t, ok)
+	assert.Error(t, err)
 }
