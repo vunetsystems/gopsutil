@@ -254,6 +254,13 @@ func (p *Process) Percent(interval time.Duration) (float64, error) {
 }
 
 func (p *Process) PercentWithContext(ctx context.Context, interval time.Duration) (float64, error) {
+	// On platforms where ps -o time has only 1-second resolution (AIX, Solaris),
+	// the delta approach over short intervals always returns 0. Those platforms
+	// implement nativePercentWithContext using ps -o pcpu instead.
+	if pct, ok, err := p.nativePercentWithContext(ctx); ok {
+		return pct, err
+	}
+
 	cpuTimes, err := p.TimesWithContext(ctx)
 	if err != nil {
 		return 0, err
