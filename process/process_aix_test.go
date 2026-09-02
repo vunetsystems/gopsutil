@@ -317,3 +317,109 @@ func TestProcess_AIX_NativePercent_InvalidValue(t *testing.T) {
 	assert.True(t, ok)
 	assert.Error(t, err)
 }
+
+func TestProcess_AIX_Ppid(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o ppid -p 1234": "PPID\n 5678\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	ppid, err := p.PpidWithContext(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(5678), ppid)
+}
+
+func TestProcess_AIX_Ppid_InvalidValue(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o ppid -p 1234": "PPID\n notanumber\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	_, err := p.PpidWithContext(context.Background())
+	assert.Error(t, err)
+}
+
+func TestProcess_AIX_Children(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o pid,ppid -A": `  PID  PPID
+ 1000  1001
+ 2000  1234
+ 2001  1234
+ 3000  2000
+ 3001  5678
+`,
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	children, err := p.ChildrenWithContext(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 2, len(children))
+	assert.Equal(t, int32(2000), children[0].Pid)
+	assert.Equal(t, int32(2001), children[1].Pid)
+}
+
+func TestProcess_AIX_Children_NoChildren(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o pid,ppid -A": `  PID  PPID
+ 1000  1001
+ 2000  1001
+ 3000  2000
+`,
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	children, err := p.ChildrenWithContext(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, len(children))
+}
+
+func TestProcess_AIX_Children_Sorted(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o pid,ppid -A": `  PID  PPID
+ 3001  1234
+ 1000  1001
+ 2000  1234
+ 2001  1234
+ 3000  2000
+`,
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	children, err := p.ChildrenWithContext(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 3, len(children))
+	// Should be sorted by PID
+	assert.Equal(t, int32(2000), children[0].Pid)
+	assert.Equal(t, int32(2001), children[1].Pid)
+	assert.Equal(t, int32(3001), children[2].Pid)
+}
