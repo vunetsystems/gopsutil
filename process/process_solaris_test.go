@@ -5,9 +5,12 @@ package process
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"testing"
 	"time"
 
@@ -306,4 +309,143 @@ func TestProcess_Solaris_NativePercent_InvalidValue(t *testing.T) {
 	_, ok, err := p.nativePercentWithContext(context.Background())
 	assert.True(t, ok)
 	assert.Error(t, err)
+}
+
+func TestProcess_Solaris_Ppid(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o ppid -p 1234": "PPID\n 5678\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	ppid, err := p.PpidWithContext(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(5678), ppid)
+}
+
+func TestProcess_Solaris_Ppid_InvalidValue(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o ppid -p 1234": "PPID\n notanumber\n",
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	_, err := p.PpidWithContext(context.Background())
+	assert.Error(t, err)
+}
+
+// startSleeper starts a real process and returns its pid, killing it when the
+// test ends. ChildrenWithContext validates every candidate pid through
+// NewProcessWithContext, which checks the live system rather than the mocked
+// invoker, so mocked ps rows must name pids that actually exist.
+func startSleeper(t *testing.T) int32 {
+	t.Helper()
+
+	cmd := exec.Command("sleep", "30")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	})
+	return int32(cmd.Process.Pid)
+}
+
+// sortedPids returns pids in the order ChildrenWithContext is expected to
+// return them.
+func sortedPids(pids ...int32) []int32 {
+	sort.Slice(pids, func(i, j int) bool { return pids[i] < pids[j] })
+	return pids
+}
+
+func TestProcess_Solaris_Children(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	child1 := startSleeper(t)
+	child2 := startSleeper(t)
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o pid,ppid -A": fmt.Sprintf(`  PID  PPID
+ 1000  1001
+ %d  1234
+ %d  1234
+ 3000  2000
+ 3001  5678
+`, child1, child2),
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	children, err := p.ChildrenWithContext(context.Background())
+	require.NoError(t, err)
+	require.Len(t, children, 2)
+	expected := sortedPids(child1, child2)
+	assert.Equal(t, expected[0], children[0].Pid)
+	assert.Equal(t, expected[1], children[1].Pid)
+}
+
+func TestProcess_Solaris_Children_NoChildren(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			"ps -o pid,ppid -A": `  PID  PPID
+ 1000  1001
+ 2000  1001
+ 3000  2000
+`,
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	children, err := p.ChildrenWithContext(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, children)
+}
+
+func TestProcess_Solaris_Children_Sorted(t *testing.T) {
+	originalInvoke := invoke
+	defer func() { invoke = originalInvoke }()
+
+	child1 := startSleeper(t)
+	child2 := startSleeper(t)
+	child3 := startSleeper(t)
+
+	mock := &mockInvoker{
+		outputs: map[string]string{
+			// Deliberately out of pid order in the ps output
+			"ps -o pid,ppid -A": fmt.Sprintf(`  PID  PPID
+ %d  1234
+ 1000  1001
+ %d  1234
+ %d  1234
+ 3000  2000
+`, child3, child1, child2),
+		},
+	}
+	invoke = mock
+
+	p := &Process{Pid: 1234}
+	children, err := p.ChildrenWithContext(context.Background())
+	require.NoError(t, err)
+	require.Len(t, children, 3)
+	// Should be sorted by PID
+	expected := sortedPids(child1, child2, child3)
+	assert.Equal(t, expected[0], children[0].Pid)
+	assert.Equal(t, expected[1], children[1].Pid)
+	assert.Equal(t, expected[2], children[2].Pid)
 }

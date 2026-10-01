@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,7 +61,15 @@ func ProcessesWithContext(ctx context.Context) ([]*Process, error) {
 	return out, nil
 }
 func (p *Process) PpidWithContext(ctx context.Context) (int32, error) {
-	panic("CRITICAL: Function not implemented")
+	ppidStr, err := p.getPsField(ctx, "ppid")
+	if err != nil {
+		return 0, err
+	}
+	ppid, err := strconv.ParseInt(ppidStr, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	return int32(ppid), nil
 }
 
 func (p *Process) NameWithContext(ctx context.Context) (string, error) {
@@ -230,7 +239,40 @@ func (p *Process) PageFaultsWithContext(ctx context.Context) (*PageFaultsStat, e
 }
 
 func (p *Process) ChildrenWithContext(ctx context.Context) ([]*Process, error) {
-	panic("CRITICAL: Function not implemented")
+	out, err := invoke.CommandWithContext(ctx, "ps", "-o", "pid,ppid", "-A")
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	ret := make([]*Process, 0)
+
+	for _, line := range lines[1:] { // Skip header line
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+
+		ppid, err := strconv.ParseInt(fields[1], 10, 32)
+		if err != nil {
+			continue
+		}
+
+		if ppid == int64(p.Pid) {
+			pid, err := strconv.ParseInt(fields[0], 10, 32)
+			if err != nil {
+				continue
+			}
+			np, err := NewProcessWithContext(ctx, int32(pid))
+			if err != nil {
+				continue
+			}
+			ret = append(ret, np)
+		}
+	}
+
+	sort.Slice(ret, func(i, j int) bool { return ret[i].Pid < ret[j].Pid })
+	return ret, nil
 }
 
 func (p *Process) OpenFilesWithContext(ctx context.Context) ([]OpenFilesStat, error) {
